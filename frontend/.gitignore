@@ -33,3 +33,7 @@ data/products.json
 # Temporary backups
 *.backup
 *.before_conflict_ui
+
+.coverage
+htmlcov/
+coverage.xml
