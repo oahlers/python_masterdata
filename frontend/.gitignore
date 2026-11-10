@@ -1,0 +1,35 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# macOS / editors
+.DS_Store
+.vscode/
+.idea/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Generated output
+output/
+
+# Local databases / runtime state
+data/reservations.db
+*.db
+*.sqlite
+*.sqlite3
+
+# Golden Record / internal product data
+data/products.json
+
+# Temporary backups
+*.backup
+*.before_conflict_ui
