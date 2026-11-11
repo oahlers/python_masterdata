@@ -1,269 +1,285 @@
+"""Shared fixtures for the MASTERDATA/SKU regression suite."""
 from __future__ import annotations
 
-import inspect
+from dataclasses import dataclass
+import importlib
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, Callable
 
 import pytest
 
-from app import item_number_generator as generator_module
-from app import item_number_reservation as reservation_module
-from app import item_number_service as service_module
-from app import verification as verification_module
-from app.import_analyzer import AnalyzedProduct
-from app.models import M3Product, ProductProposal, SourceProduct
-from app.product_resolver import ProductResolver
 
-NEW_EAN = "3666057504815"
+FIRST_CANDIDATE = "12817743184"
+SECOND_CANDIDATE = "12817743185"
+EXISTING_ITEM_NUMBER = "1289490174"
 EXISTING_EAN = "3666057463617"
 CONFLICT_EAN = "3666057483066"
-EXISTING_ITEM_NUMBER = "1289490174"
-FIRST_CANDIDATE = "12812345678"
-SECOND_CANDIDATE = "12887654321"
+NEW_EAN = "3616300000001"
 
 
-def _clean(value: Any) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
+@dataclass(slots=True)
+class SourceProductFixture:
+    product_code: str = "80133745"
+    ean: str | None = NEW_EAN
+    product_name: str = "TEST SI CPCT POWDR GDT U0 5.8G"
+    saether_code: str | None = None
+    brand_code: str | None = "128"
+    brand_name: str | None = "CLARINS"
 
 
-def _default_for_parameter(parameter: inspect.Parameter) -> Any:
-    if parameter.default is not inspect.Parameter.empty:
-        return parameter.default
-    annotation = str(parameter.annotation).lower()
-    if "dict" in annotation:
-        return {}
-    if "list" in annotation:
-        return []
-    if "set" in annotation:
-        return set()
-    if "bool" in annotation:
-        return False
-    return None
+@dataclass(slots=True)
+class M3ProductFixture:
+    mmitno: str = EXISTING_ITEM_NUMBER
+    ean: str | None = EXISTING_EAN
+    product_name: str = "EXISTING CLARINS PRODUCT"
+    brand_code: str | None = "128"
+    brand_name: str | None = "CLARINS"
+    item_type: str | None = "12"
+    item_group: str | None = "128668"
+    item_class: str | None = "12866874000"
+    product_group: str | None = "12804"
+    product_line: str | None = "128S"
+    item_category: str | None = "741"
+
+    @property
+    def item_number(self) -> str:
+        return self.mmitno
 
 
-def _construct(cls: type, values: dict[str, Any]):
-    signature = inspect.signature(cls)
-    kwargs: dict[str, Any] = {}
-    for name, parameter in signature.parameters.items():
-        if name in values:
-            value = values[name]
-        elif parameter.default is not inspect.Parameter.empty:
-            continue
-        else:
-            value = _default_for_parameter(parameter)
-        if isinstance(value, (dict, list, set)):
-            value = value.copy()
-        kwargs[name] = value
-    return cls(**kwargs)
+@dataclass(slots=True)
+class ProductProposalFixture:
+    source_product: SourceProductFixture
 
+    item_number: str | None = None
 
-def make_source_product(**overrides: Any) -> SourceProduct:
-    values: dict[str, Any] = {
-        "product_code": "80133626",
-        "ean": NEW_EAN,
-        "product_name": "TEST SI INSTANT SMOOTH 15ML",
-        "brand_name": "CLARINS",
-        "saether_code": None,
-        "product_type": None,
-        "source_file": "pytest.xlsx",
-        "raw_data": {},
-    }
-    values.update(overrides)
-    return _construct(SourceProduct, values)
+    brand_code: str | None = "128"
+    brand_name: str | None = "CLARINS"
+    generation_prefix: str | None = "128"
 
+    item_type: str | None = "12"
+    item_group: str | None = "128668"
+    item_class: str | None = "12866874000"
+    product_group: str | None = "12804"
 
-def make_m3_product(**overrides: Any) -> M3Product:
-    values: dict[str, Any] = {
-        "mmitno": EXISTING_ITEM_NUMBER,
-        "ean": EXISTING_EAN,
-        "mmitds": "EXISTING CLARINS PRODUCT",
-        "mmity": "12",
-        "mmitgr": "128591",
-        "mmitcl": "12804",
-        "mmbuar": "128",
-        "mmbuartx40": "CLARINS",
-        "mmstat": "20",
-        "raw_data": {},
-    }
-    values.update(overrides)
-    return _construct(M3Product, values)
+    product_line: str | None = "128S"
+    item_category: str | None = "741"
 
+    m3_name: str | None = "TEST SI CPCT POWDR GDT U0 5.8G"
+    line_2: str | None = None
+    receipt_text: str | None = None
 
-def make_proposal(source_product: SourceProduct | None = None, **overrides: Any) -> ProductProposal:
-    source_product = source_product or make_source_product()
-    values: dict[str, Any] = {
-        "source_product": source_product,
-        "item_number": None,
-        "brand_code": "128",
-        "brand_name": "CLARINS",
-        "item_group": "128591",
-        "item_class": "12804",
-        "item_type": "12",
-        "product_line": "MKU face primer",
-        "mmstat": "10",
-        "evidence": {},
-        "needs_review": [],
-    }
-    values.update(overrides)
-    return _construct(ProductProposal, values)
+    mmstat: str = "10"
 
+    needs_review: tuple[str, ...] | list[str] = ("item_number",)
+    status: str = "READY"
 
-class FakeGoldenRecord:
-    def __init__(self, products: list[M3Product] | None = None):
-        self.products = list(products or [])
+class GoldenRecordFixture:
+    """Small in-memory Golden Record whose finders return lists."""
 
-    def add(self, product: M3Product | None = None, **values: Any) -> M3Product:
-        product = product or make_m3_product(**values)
+    def __init__(self, products: list[M3ProductFixture] | None = None) -> None:
+        self.products = list(products or ())
+
+    def add(self, product: M3ProductFixture) -> None:
         self.products.append(product)
-        return product
 
-    def find_by_item_number(self, item_number: str | None) -> M3Product | None:
-        wanted = _clean(item_number)
-        return next((p for p in self.products if _clean(p.mmitno) == wanted), None)
+    def load(self) -> "GoldenRecordFixture":
+        return self
 
-    def find_by_ean(self, ean: str | None) -> list[M3Product]:
-        wanted = _clean(ean)
-        if wanted is None:
-            return []
-        return [p for p in self.products if _clean(p.ean) == wanted]
+    def find_by_item_number(self, item_number: Any) -> list[M3ProductFixture]:
+        wanted = _identifier(item_number)
+        return [
+            product
+            for product in self.products
+            if _identifier(product.mmitno) == wanted
+        ]
 
-    def find_by_brand_code(self, brand_code: str | None) -> list[M3Product]:
-        wanted = _clean(brand_code)
-        return [p for p in self.products if _clean(p.mmbuar) == wanted]
+    def find_by_ean(self, ean: Any) -> list[M3ProductFixture]:
+        wanted = _identifier(ean)
+        return [
+            product for product in self.products if _identifier(product.ean) == wanted
+        ]
 
+    def __iter__(self):
+        return iter(self.products)
 
-def generate_candidate(prefix: str, golden_record: FakeGoldenRecord) -> str:
-    return generator_module.generate_item_number(
-        generation_prefix=prefix,
-        golden_record=golden_record,
-        reserved_numbers=set(),
-    )
-
-
-def patch_service_candidates(monkeypatch: pytest.MonkeyPatch, candidates: list[str]) -> None:
-    iterator = iter(candidates)
-
-    def deterministic(brand_code: str, golden_record: Any, reserved_numbers: set[str] | None = None) -> str:
-        del brand_code, golden_record, reserved_numbers
-        return next(iterator)
-
-    monkeypatch.setattr(service_module, "generate_item_number_for_brand", deterministic)
+    def __len__(self) -> int:
+        return len(self.products)
 
 
-def assign_item_number(proposal: ProductProposal, golden_record: FakeGoldenRecord, database_path: Path) -> ProductProposal:
-    result = service_module.assign_item_number(
-        proposal=proposal,
-        golden_record=golden_record,
-        database_path=database_path,
-    )
-    assert isinstance(result, str)
-    assert proposal.item_number == result
-    return proposal
+@pytest.fixture
+def source_factory():
+    def factory(**overrides: Any) -> SourceProductFixture:
+        values = {
+            "product_code": "80133745",
+            "ean": NEW_EAN,
+            "product_name": "TEST SI CPCT POWDR GDT U0 5.8G",
+            "saether_code": None,
+            "brand_code": "128",
+            "brand_name": "CLARINS",
+        }
+        values.update(overrides)
+        return SourceProductFixture(**values)
+
+    return factory
 
 
-def reserve(product: SourceProduct, item_number: str, database_path: Path):
-    return reservation_module.reserve_item_number(product=product, item_number=item_number, database_path=database_path)
+@pytest.fixture
+def new_source_product(source_factory: Callable[..., SourceProductFixture]) -> SourceProductFixture:
+    return source_factory()
 
 
-def get_reservation(product: SourceProduct, database_path: Path):
-    return reservation_module.get_reservation_for_product(product=product, database_path=database_path)
+@pytest.fixture
+def m3_factory():
+    def factory(**overrides: Any) -> M3ProductFixture:
+        values = {
+            "mmitno": EXISTING_ITEM_NUMBER,
+            "ean": EXISTING_EAN,
+            "product_name": "EXISTING CLARINS PRODUCT",
+            "brand_code": "128",
+            "brand_name": "CLARINS",
+            "item_type": "12",
+            "item_group": "128668",
+            "item_class": "12866874000",
+            "product_group": "12804",
+            "product_line": "128S",
+            "item_category": "741",
+        }
+        values.update(overrides)
+        return M3ProductFixture(**values)
+
+    return factory
 
 
-def is_reserved(item_number: str, database_path: Path) -> bool:
-    return bool(reservation_module.item_number_is_reserved(item_number=item_number, database_path=database_path))
+@pytest.fixture
+def empty_golden_record() -> GoldenRecordFixture:
+    return GoldenRecordFixture()
 
 
-def make_analyzed_product(proposal: ProductProposal, golden_record: FakeGoldenRecord, *, status: str = "READY") -> AnalyzedProduct:
-    resolution = ProductResolver(golden_record).resolve(proposal.source_product)
+@pytest.fixture
+def golden_record(m3_factory: Callable[..., M3ProductFixture]) -> GoldenRecordFixture:
+    return GoldenRecordFixture([m3_factory()])
+
+
+@pytest.fixture
+def proposal_factory(source_factory: Callable[..., SourceProductFixture]):
+    def factory(
+        source_product: SourceProductFixture | None = None,
+        **overrides: Any,
+    ) -> ProductProposalFixture:
+        source = source_product or source_factory()
+        values = {
+    "source_product": source,
+    "item_number": None,
+    "brand_code": source.brand_code,
+    "brand_name": source.brand_name,
+    "generation_prefix": "128",
+    "item_type": "12",
+    "item_group": "128668",
+    "item_class": "12866874000",
+    "product_group": "12804",
+    "product_line": "128S",
+    "item_category": "741",
+    "m3_name": source.product_name,
+    "line_2": None,
+    "receipt_text": None,
+    "mmstat": "10",
+    "needs_review": ("item_number",),
+    "status": "READY",
+}
+        values.update(overrides)
+        return ProductProposalFixture(**values)
+
+    return factory
+
+
+@pytest.fixture
+def ready_proposal(proposal_factory: Callable[..., ProductProposalFixture]) -> ProductProposalFixture:
+    return proposal_factory()
+
+
+@pytest.fixture
+def analyzed_product(ready_proposal: ProductProposalFixture):
+    from app.import_analyzer import AnalyzedProduct
+    from app.product_resolver import NEW_PRODUCT, ProductResolution
+
+    source = ready_proposal.source_product
     return AnalyzedProduct(
-        source_product=proposal.source_product,
-        status=status,
-        product_resolution=resolution,
-        proposal=proposal,
-        family_match=None,
-        existing_products=list(resolution.existing_products),
-        message="pytest",
+        source_product=source,
+        status="READY",
+        product_resolution=ProductResolution(
+            status=NEW_PRODUCT,
+            source_product=source,
+        ),
+        proposal=ready_proposal,
     )
-
-
-def prepare_product(proposal: ProductProposal, golden_record: FakeGoldenRecord, database_path: Path, *, status: str = "READY"):
-    item = make_analyzed_product(proposal, golden_record, status=status)
-    return verification_module.prepare_single_product(item=item, golden_record=golden_record, database_path=database_path)
-
-
-def prepared_proposal(result: Any, fallback: ProductProposal) -> ProductProposal:
-    return fallback
 
 
 @pytest.fixture
 def reservation_db_path(tmp_path: Path) -> Path:
-    return tmp_path / "reservations.db"
-
-
-@pytest.fixture
-def empty_golden_record() -> FakeGoldenRecord:
-    return FakeGoldenRecord()
-
-
-@pytest.fixture
-def golden_record() -> FakeGoldenRecord:
-    return FakeGoldenRecord([make_m3_product()])
-
-
-@pytest.fixture
-def source_factory() -> Callable[..., SourceProduct]:
-    return make_source_product
-
-
-@pytest.fixture
-def m3_factory() -> Callable[..., M3Product]:
-    return make_m3_product
-
-
-@pytest.fixture
-def proposal_factory() -> Callable[..., ProductProposal]:
-    return make_proposal
-
-
-@pytest.fixture
-def analyzed_factory() -> Callable[..., AnalyzedProduct]:
-    return make_analyzed_product
-
-
-@pytest.fixture
-def new_source_product() -> SourceProduct:
-    return make_source_product()
-
-
-@pytest.fixture
-def ready_proposal(new_source_product: SourceProduct) -> ProductProposal:
-    return make_proposal(new_source_product)
-
-
-@pytest.fixture
-def generator_api():
-    return generate_candidate
-
-
-@pytest.fixture
-def candidate_patcher():
-    return patch_service_candidates
-
-
-@pytest.fixture
-def assignment_api():
-    return assign_item_number
+    return tmp_path / "item_number_reservations.sqlite3"
 
 
 @pytest.fixture
 def reservation_api():
-    return SimpleNamespace(reserve=reserve, get=get_reservation, is_reserved=is_reserved)
+    return importlib.import_module("app.item_number_reservation")
+
+
+@pytest.fixture
+def generator_api():
+    from app.item_number_generator import generate_item_number
+
+    return generate_item_number
+
+
+@pytest.fixture
+def assignment_api():
+    from app.item_number_service import assign_item_number
+
+    def assign(proposal, golden_record, database_path):
+        assign_item_number(
+            proposal,
+            golden_record,
+            database_path,
+            verified_generation_prefix=proposal.generation_prefix,
+        )
+        return proposal
+
+    return assign
 
 
 @pytest.fixture
 def verification_api():
-    return SimpleNamespace(prepare=prepare_product, proposal=prepared_proposal)
+    return importlib.import_module("app.verification")
+
+@pytest.fixture
+def verification_api():
+    return importlib.import_module("app.verification")
+
+
+@pytest.fixture
+def candidate_patcher():
+    """Patch the pure generator seam with a deterministic finite sequence."""
+
+    def patch(
+        monkeypatch: pytest.MonkeyPatch,
+        candidates: list[str] | tuple[str, ...],
+    ):
+        values = tuple(str(candidate) for candidate in candidates)
+
+        def generated(_prefix: str, _count: int = 100):
+            yield from values
+
+        module = importlib.import_module("app.item_number_generator")
+        monkeypatch.setattr(module, "generate_item_number_candidates", generated)
+        return values
+
+    return patch
+
+
+def _identifier(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text.endswith(".0") and text[:-2].isdigit():
+        text = text[:-2]
+    return text or None

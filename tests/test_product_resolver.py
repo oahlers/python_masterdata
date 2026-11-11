@@ -46,3 +46,23 @@ def test_matching_item_number_and_ean_is_existing_product(
     result = ProductResolver(golden_record).resolve(product)
 
     assert result.status == "EXISTING_PRODUCT"
+
+
+def test_duplicate_ean_is_ambiguous(
+    golden_record,
+    m3_factory,
+    source_factory,
+):
+    golden_record.add(
+        m3_factory(
+            mmitno="12800000000",
+            ean=EXISTING_EAN,
+        )
+    )
+
+    result = ProductResolver(golden_record).resolve(
+        source_factory(ean=EXISTING_EAN)
+    )
+
+    assert result.status == "AMBIGUOUS"
+    assert len(result.existing_products) == 2

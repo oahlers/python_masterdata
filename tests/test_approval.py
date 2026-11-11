@@ -1,7 +1,6 @@
 import pytest
 
 from app.approval import approve_product, validate_proposal_for_approval
-
 from conftest import FIRST_CANDIDATE, SECOND_CANDIDATE
 
 
@@ -42,7 +41,7 @@ def test_pending_review_is_blocked(
     reservation_api,
 ):
     ready_proposal.item_number = FIRST_CANDIDATE
-    ready_proposal.needs_review = ["item_class"]
+    ready_proposal.needs_review = ("item_number", "item_class")
     reservation_api.reserve(
         ready_proposal.source_product,
         FIRST_CANDIDATE,
@@ -56,6 +55,7 @@ def test_pending_review_is_blocked(
     )
 
     assert any("kræver review" in error for error in errors)
+    assert ready_proposal.needs_review == ("item_number", "item_class")
 
 
 def test_mismatched_persistent_reservation_is_blocked(
@@ -101,6 +101,7 @@ def test_valid_reserved_proposal_can_be_approved(
     )
 
     assert approved.approved is True
+    assert approved.status == "APPROVED"
     assert approved.proposal is ready_proposal
     assert approved.approval_source == "user"
     assert approved.approved_at
@@ -133,3 +134,28 @@ def test_revalidation_blocks_ean_that_appears_after_preparation(
             database_path=reservation_db_path,
             confirmed=True,
         )
+
+
+def test_tuple_backed_review_collection_is_not_mutated(
+    ready_proposal,
+    empty_golden_record,
+    reservation_db_path,
+    reservation_api,
+):
+    ready_proposal.item_number = FIRST_CANDIDATE
+    ready_proposal.needs_review = ("item_number",)
+    reservation_api.reserve(
+        ready_proposal.source_product,
+        FIRST_CANDIDATE,
+        reservation_db_path,
+    )
+
+    approved = approve_product(
+        proposal=ready_proposal,
+        golden_record=empty_golden_record,
+        database_path=reservation_db_path,
+        confirmed=True,
+    )
+
+    assert approved.approved is True
+    assert ready_proposal.needs_review == ("item_number",)

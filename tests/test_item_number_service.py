@@ -67,11 +67,11 @@ def test_generated_item_number_is_not_in_golden_record(
     )
 
     assert (
-        empty_golden_record.find_by_item_number(
-            SECOND_CANDIDATE
-        )
-        is None
+    empty_golden_record.find_by_item_number(
+        SECOND_CANDIDATE
     )
+    == []
+)
 
     reservation = reservation_api.get(
         ready_proposal.source_product,

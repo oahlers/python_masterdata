@@ -1,144 +1,71 @@
+"""Pure validation and generation of Sæther Code candidates."""
+from __future__ import annotations
+
 import secrets
+from collections.abc import Iterator
+from typing import Any
 
-from app.golden_record import GoldenRecord
-from app.brand_rules import resolve_brand_rule
 
-
+PREFIX_LENGTH = 3
 SUFFIX_LENGTH = 8
-MAX_ATTEMPTS = 100
+ITEM_NUMBER_LENGTH = PREFIX_LENGTH + SUFFIX_LENGTH
+DEFAULT_CANDIDATE_COUNT = 100
 
 
-def validate_generation_prefix(
-    generation_prefix: str,
-) -> str:
-    """
-    Et generation-prefix skal bestå af præcis tre cifre.
+def validate_generation_prefix(generation_prefix: Any) -> str:
+    """Return a normalized prefix or reject anything except exactly three digits."""
 
-    Bemærk:
-    Dette er generation-prefixet, ikke nødvendigvis MMBUAR.
-    """
-
+    if generation_prefix is None:
+        raise ValueError("Generation-prefix skal bestå af præcis tre cifre.")
     prefix = str(generation_prefix).strip()
-
-    if len(prefix) != 3 or not prefix.isdigit():
-        raise ValueError(
-            "Generation-prefix skal bestå af præcis tre cifre."
-        )
-
+    if len(prefix) != PREFIX_LENGTH or not prefix.isdigit():
+        raise ValueError("Generation-prefix skal bestå af præcis tre cifre.")
     return prefix
 
 
 def generate_suffix() -> str:
-    """
-    Genererer præcis otte tilfældige cifre.
-    """
+    """Generate exactly eight random decimal digits, preserving leading zeroes."""
 
-    return f"{secrets.randbelow(100_000_000):08d}"
+    return f"{secrets.randbelow(10**SUFFIX_LENGTH):0{SUFFIX_LENGTH}d}"
 
 
-def item_number_exists(
-    item_number: str,
-    golden_record: GoldenRecord,
-    reserved_numbers: set[str] | None = None,
-) -> bool:
-    """
-    Kontrollerer både Golden Record og numre,
-    som allerede er reserveret i den aktuelle import.
-    """
-
-    if golden_record.find_by_item_number(item_number) is not None:
-        return True
-
-    if reserved_numbers and item_number in reserved_numbers:
-        return True
-
-    return False
-
-
-def generate_item_number(
-    generation_prefix: str,
-    golden_record: GoldenRecord,
-    reserved_numbers: set[str] | None = None,
-    max_attempts: int = MAX_ATTEMPTS,
+def validate_item_number_candidate(
+    candidate: Any,
+    generation_prefix: Any,
 ) -> str:
-    """
-    Genererer et nyt globalt unikt MMITNO.
+    """Validate an eleven-digit candidate against an explicit verified prefix."""
 
-    Format:
-        3-cifret generation-prefix
-        +
-        8 tilfældige cifre
-
-    Eksempel:
-        128 + 12345678
-        = 12812345678
-    """
-
-    prefix = validate_generation_prefix(
-        generation_prefix
-    )
-
-    if reserved_numbers is None:
-        reserved_numbers = set()
-
-    for _ in range(max_attempts):
-        item_number = (
-            prefix
-            + generate_suffix()
-        )
-
-        if item_number_exists(
-            item_number,
-            golden_record,
-            reserved_numbers,
-        ):
-            continue
-
-        reserved_numbers.add(item_number)
-
-        return item_number
-
-    raise RuntimeError(
-        f"Kunne ikke generere et ledigt MMITNO for "
-        f"generation-prefix {prefix} efter "
-        f"{max_attempts} forsøg."
-    )
-
-def generate_item_number_for_brand(
-    brand_code: str,
-    golden_record: GoldenRecord,
-    reserved_numbers: set[str] | None = None,
-) -> str:
-    """
-    Genererer MMITNO ud fra brandets verificerede
-    generation-prefix.
-
-    Prefix vælges aldrig direkte fra MMBUAR.
-    Det skal først godkendes af brand_rules.
-    """
-
-    resolution = resolve_brand_rule(
-        brand_code=brand_code,
-        products=golden_record.products,
-    )
-
-    if resolution.rule is None:
-        observed = [
-            prefix
-            for prefix, _ in resolution.prefix_counts
-        ]
-
+    prefix = validate_generation_prefix(generation_prefix)
+    if candidate is None:
+        raise ValueError("Sæther Code-kandidat mangler.")
+    value = str(candidate).strip()
+    if (
+        len(value) != ITEM_NUMBER_LENGTH
+        or not value.isdigit()
+        or not value.startswith(prefix)
+    ):
         raise ValueError(
-            f"Brand {brand_code} har ikke et sikkert "
-            f"generation-prefix. "
-            f"Status: {resolution.status}. "
-            f"Observerede prefixes: {observed}"
+            "Sæther Code-kandidat skal bestå af generation-prefixet "
+            "efterfulgt af præcis otte cifre."
         )
+    return value
 
-    return generate_item_number(
-        generation_prefix=(
-            resolution.rule.generation_prefix
-        ),
-        golden_record=golden_record,
-        reserved_numbers=reserved_numbers,
-    )
+
+def generate_item_number(generation_prefix: Any) -> str:
+    """Generate one format-valid candidate; uniqueness is a service responsibility."""
+
+    prefix = validate_generation_prefix(generation_prefix)
+    return prefix + generate_suffix()
+
+
+def generate_item_number_candidates(
+    generation_prefix: Any,
+    count: int = DEFAULT_CANDIDATE_COUNT,
+) -> Iterator[str]:
+    """Yield a bounded sequence of format-valid candidates."""
+
+    prefix = validate_generation_prefix(generation_prefix)
+    if count < 0:
+        raise ValueError("Antal kandidater må ikke være negativt.")
+    for _ in range(count):
+        yield prefix + generate_suffix()

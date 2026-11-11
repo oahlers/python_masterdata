@@ -1,72 +1,80 @@
-"""Build MASTERDATA records from products already approved by the SKU flow.
+"""Build MASTERDATA previews and final rows around the SKU lifecycle.
 
-The builder is a downstream consumer.  It does not calculate or change an item
-number and therefore does not modify the frozen SKU creation engine.
+This downstream adapter never calculates or changes an item number.  Analysis
+previews may exist before verification reserves MMITNO, while approved/export
+rows must already carry that reserved number.  Both paths derive classification
+from live Golden Record evidence plus the current template and keep unsupported
+values blank for review.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from pathlib import Path
 from typing import Any
 
+from app.masterdata_classification import derive_documented_classification
 from app.masterdata_model import MasterDataRecord
+from app.masterdata_reference import TemplateReferenceData
 
 
-# Only mappings confirmed by the Golden Record/template investigation are
-# included.  Add new entries only when an authoritative source confirms them.
-VERIFIED_ITEM_GROUP_DESCRIPTIONS: Mapping[str, str] = {
-    "128591": "Instant Smooth",
-}
-
-VERIFIED_PRODUCT_LINE_CODES: Mapping[str, str] = {
-    "mku face primer": "740",
-}
+DEFAULT_TEMPLATE_PATH = Path("templates/saether_masterdata_template.xlsx")
 
 
 class MasterDataBuilder:
-    """Map ``ApprovedProduct`` instances to :class:`MasterDataRecord`.
-
-    The project has used both nested and flattened representations while the
-    workflow evolved.  This class prefers ``approved_product.proposal`` and
-    ``approved_product.source_product`` but accepts equivalent attributes on
-    the approved object itself.  That compatibility is intentionally confined
-    to this downstream adapter.
-    """
-
     def __init__(
         self,
         *,
-        item_group_descriptions: Mapping[str, str] | None = None,
-        product_line_codes: Mapping[str, str] | None = None,
+        golden_record: Any | None = None,
+        template_reference: TemplateReferenceData | None = None,
+        template_path: str | Path = DEFAULT_TEMPLATE_PATH,
     ) -> None:
-        self._item_group_descriptions = dict(
-            item_group_descriptions or VERIFIED_ITEM_GROUP_DESCRIPTIONS
-        )
-        self._product_line_codes = {
-            str(key).strip().casefold(): _identifier(value)
-            for key, value in (
-                product_line_codes or VERIFIED_PRODUCT_LINE_CODES
-            ).items()
-        }
+        self._golden_record = golden_record
+        if template_reference is not None:
+            self._template_reference = template_reference
+        else:
+            path = Path(template_path)
+            self._template_reference = (
+                TemplateReferenceData.from_xlsx(path)
+                if path.is_file()
+                else None
+            )
 
     def build(self, approved_product: Any) -> MasterDataRecord:
-        """Build a documented export record for one approved product.
-
-        A present status field must be ``APPROVED``.  ``ApprovedProduct``
-        classes without an explicit status are accepted because their type
-        already represents that invariant.
-        """
-
         _assert_approved(approved_product)
-
-        proposal = _first_present(
+        return self._build(
             approved_product,
+            require_item_number=True,
+        )
+
+    def build_preview(self, product: Any) -> MasterDataRecord:
+        """Build a read-only preview, including before MMITNO reservation."""
+
+        return self._build(
+            product,
+            require_item_number=False,
+        )
+
+    def build_many(
+        self,
+        approved_products: Iterable[Any],
+    ) -> list[MasterDataRecord]:
+        return [self.build(product) for product in approved_products]
+
+    def _build(
+        self,
+        product: Any,
+        *,
+        require_item_number: bool,
+    ) -> MasterDataRecord:
+        proposal = _first_present(
+            product,
             "proposal",
             "product_proposal",
-            default=approved_product,
+            default=product,
         )
         source_product = _first_present(
-            approved_product,
+            product,
             "source_product",
             "source",
             default=None,
@@ -80,151 +88,192 @@ class MasterDataBuilder:
             )
         if source_product is None:
             raise ValueError(
-                "ApprovedProduct must expose source_product (directly or via proposal)"
+                "Product must expose source_product (directly or via proposal)"
             )
 
-        item_number = _required_identifier(
-            _coalesce(
-                _first_present(proposal, "item_number", default=None),
-                _first_present(approved_product, "item_number", default=None),
-            ),
-            "proposal.item_number",
+        raw_item_number = _coalesce(
+            _read(proposal, "item_number"),
+            _read(product, "item_number"),
         )
-        product_name = _required_text(
-            _first_present(source_product, "product_name", "name", default=None),
-            "source_product.product_name",
+        item_number = (
+            _required_identifier(
+                raw_item_number,
+                "proposal.item_number",
+            )
+            if require_item_number
+            else _identifier_or_none(raw_item_number)
         )
-        m3_name = _bounded_text(product_name, 30, uppercase=True)
+        review_values = _review_values(proposal, source_product, product)
+        documented = derive_documented_classification(
+            proposal,
+            self._golden_record,
+            source_product=source_product,
+            template_reference=self._template_reference,
+        )
 
         item_group = _identifier_or_none(
             _coalesce(
-                _first_present(proposal, "item_group", "mmitgr", default=None),
-                _first_present(approved_product, "item_group", default=None),
+                _read(review_values, "item_group"),
+                documented.item_group,
             )
         )
-        product_line_value = _coalesce(
-            _first_present(
-                proposal,
-                "product_line_description",
-                "product_line",
-                "mmcfi1tx40",
-                default=None,
-            ),
-            _first_present(
-                approved_product,
-                "product_line_description",
-                "product_line",
-                default=None,
-            ),
+        product_group = _identifier_or_none(
+            _coalesce(
+                _read(review_values, "product_group", "item_class"),
+                documented.product_group,
+            )
+        )
+        product_line = _identifier_or_none(
+            _coalesce(
+                _read(review_values, "product_line"),
+                documented.product_line_code,
+            )
+        )
+        item_category = _text_or_none(
+            _coalesce(
+                _read(review_values, "item_category"),
+                documented.item_category_combined,
+            )
+        )
+        item_type = _identifier_or_none(
+            _coalesce(
+                _read(review_values, "item_type"),
+                _read(proposal, "item_type", "mmity"),
+                documented.item_type,
+            )
+        )
+        ref_number = _identifier_or_none(
+            _read(
+                source_product,
+                "product_code",
+                "supplier_item_number",
+                "ref_number",
+            )
+        )
+        ean = _identifier_or_none(_read(source_product, "ean", "gtin"))
+        brand_code = _identifier_or_none(
+            _coalesce(
+                _read(proposal, "brand_code", "mmbuar"),
+                _read(source_product, "brand_code", "mmbuar"),
+            )
+        )
+        brand_name = _text_or_none(
+            _coalesce(
+                _read(proposal, "brand_name", "mmbuartx40"),
+                _read(source_product, "brand_name", "mmbuartx40"),
+            )
         )
 
-        item_group_description = _text_or_none(
-            _coalesce(
-                _first_present(
-                    proposal,
-                    "item_group_description",
-                    "mmitgrtx40",
-                    default=None,
-                ),
-                _first_present(
-                    approved_product,
-                    "item_group_description",
-                    default=None,
-                ),
-            )
+        explicitly_new_group = _as_bool(
+            _read(review_values, "is_new_item_group", "new_item_group")
         )
-        if item_group_description is None and item_group is not None:
-            item_group_description = self._item_group_descriptions.get(item_group)
+        new_item_group = explicitly_new_group and not documented.item_group_exists
+        item_group_description = None
+        if new_item_group:
+            item_group_description = _bounded_optional_text(
+                _read(
+                    review_values,
+                    "item_group_description",
+                    "new_item_group_description",
+                ),
+                40,
+            )
 
-        product_line_code = _identifier_or_none(
-            _coalesce(
-                _first_present(
-                    proposal,
-                    "product_line_code",
-                    "mmcfi1",
-                    default=None,
-                ),
-                _first_present(
-                    approved_product,
-                    "product_line_code",
-                    default=None,
-                ),
-            )
-        )
-        if product_line_code is None and product_line_value is not None:
-            candidate = _identifier_or_none(product_line_value)
-            if candidate is not None and candidate.isdigit():
-                product_line_code = candidate
+        review_fields = set(documented.review_fields)
+        for field_name, value in (
+            ("m3_name", documented.m3_name),
+            ("item_type", item_type),
+            ("item_group", item_group),
+            ("product_group", product_group),
+            ("product_line", product_line),
+            ("item_category", item_category),
+            ("ref_number", ref_number),
+            ("ean", ean),
+            ("m3_description", documented.m3_description),
+            ("receipt_text", documented.receipt_text),
+        ):
+            if (
+                field_name == "receipt_text"
+                and documented.receipt_text_status == "not_applicable"
+            ):
+                review_fields.discard(field_name)
+                continue
+            if value is None:
+                review_fields.add(field_name)
             else:
-                product_line_code = self._product_line_codes.get(
-                    str(product_line_value).strip().casefold()
-                )
+                review_fields.discard(field_name)
+        if new_item_group and item_group_description is None:
+            review_fields.add("item_group_description")
+        else:
+            review_fields.discard("item_group_description")
 
         return MasterDataRecord(
             item_number=item_number,
-            m3_name=m3_name,
-            # Undocumented values intentionally stay None.
-            copy_from_item_number=None,
-            m3_description=None,
-            receipt_text=None,
-            item_type=_identifier_or_none(
-                _coalesce(
-                    _first_present(
-                        proposal, "item_type", "mmity", default=None
-                    ),
-                    _first_present(
-                        approved_product, "item_type", default=None
-                    ),
-                )
+            m3_name=documented.m3_name,
+            brand_code=brand_code,
+            brand_name=brand_name,
+            copy_from_item_number=_identifier_or_none(
+                _read(review_values, "copy_from_item_number")
             ),
+            m3_description=documented.m3_description,
+            receipt_text=documented.receipt_text,
+            m3_name_status=documented.m3_name_status,
+            m3_name_source=documented.m3_name_source,
+            m3_name_reason=documented.m3_name_reason,
+            m3_description_status=documented.m3_description_status,
+            m3_description_source=documented.m3_description_source,
+            m3_description_reason=documented.m3_description_reason,
+            receipt_text_status=documented.receipt_text_status,
+            receipt_text_source=documented.receipt_text_source,
+            receipt_text_reason=documented.receipt_text_reason,
+            receipt_text_required=documented.receipt_text_required,
+            item_type=item_type,
             item_group=item_group,
-            item_group_description=_bounded_optional_text(
-                item_group_description, 40
+            item_group_description=item_group_description,
+            product_group=product_group,
+            product_line=product_line,
+            item_category=item_category,
+            ref_number=ref_number,
+            ean=ean,
+            edition=_text_or_none(
+                _coalesce(_read(review_values, "edition"), "NY")
             ),
-            product_group=_identifier_or_none(
-                _coalesce(
-                    _first_present(
-                        proposal,
-                        "item_class",
-                        "product_group",
-                        "mmitcl",
-                        default=None,
-                    ),
-                    _first_present(
-                        approved_product,
-                        "item_class",
-                        "product_group",
-                        default=None,
-                    ),
-                )
+            net_content=_text_or_none(
+                _read(source_product, "net_content", "content")
             ),
-            product_line=product_line_code,
-            item_category=None,
-            ref_number=_identifier_or_none(
-                _first_present(
-                    source_product,
-                    "product_code",
-                    "supplier_item_number",
-                    "ref_number",
-                    default=None,
-                )
+            content_unit=_text_or_none(
+                _read(source_product, "content_unit", "unit")
             ),
-            ean=_identifier_or_none(
-                _first_present(source_product, "ean", "gtin", default=None)
+            item_group_evidence_description=(
+                documented.item_group_description
             ),
-            edition="NY",
+            product_group_description=(
+                documented.product_group_description
+            ),
+            product_line_description=(
+                documented.product_line_description
+            ),
+            item_category_code=documented.item_category_code,
+            item_category_description=(
+                documented.item_category_description
+            ),
+            evidence_item_numbers=documented.evidence_item_numbers,
+            review_fields=tuple(sorted(review_fields)),
         )
 
-    def build_many(
-        self, approved_products: Iterable[Any]
-    ) -> list[MasterDataRecord]:
-        return [self.build(product) for product in approved_products]
 
-
-def build_masterdata_record(approved_product: Any) -> MasterDataRecord:
-    """Convenience wrapper using the verified default mappings."""
-
-    return MasterDataBuilder().build(approved_product)
+def build_masterdata_record(
+    approved_product: Any,
+    *,
+    golden_record: Any | None = None,
+    template_reference: TemplateReferenceData | None = None,
+    template_path: str | Path = DEFAULT_TEMPLATE_PATH,
+) -> MasterDataRecord:
+    return MasterDataBuilder(
+        golden_record=golden_record,
+        template_reference=template_reference,
+        template_path=template_path,
+    ).build(approved_product)
 
 
 def _assert_approved(product: Any) -> None:
@@ -243,38 +292,55 @@ def _assert_approved(product: Any) -> None:
         return
 
 
-def _first_present(
-    obj: Any, *names: str, default: Any
-) -> Any:
+def _review_values(*objects: Any) -> Mapping[str, Any]:
+    merged: dict[str, Any] = {}
+    for obj in objects:
+        value = _read(obj, "masterdata_review", "masterdata_overrides")
+        if isinstance(value, Mapping):
+            merged.update(value)
+    return merged
+
+
+def _read(obj: Any, *names: str) -> Any:
     if obj is None:
-        return default
-    for name in names:
-        if hasattr(obj, name):
-            value = getattr(obj, name)
+        return None
+    if isinstance(obj, Mapping):
+        folded = {str(key).casefold(): value for key, value in obj.items()}
+        for name in names:
+            value = folded.get(name.casefold())
             if value is not None:
                 return value
-    return default
-
-
-def _coalesce(*values: Any) -> Any:
-    for value in values:
-        if value is not None:
-            return value
+        nested = folded.get("raw_data")
+        if isinstance(nested, Mapping) and nested is not obj:
+            return _read(nested, *names)
+        return None
+    for name in names:
+        for candidate in (name, name.lower(), name.upper()):
+            if hasattr(obj, candidate):
+                value = getattr(obj, candidate)
+                if value is not None:
+                    return value
+    nested = getattr(obj, "raw_data", None)
+    if isinstance(nested, Mapping):
+        return _read(nested, *names)
     return None
 
 
-def _identifier(value: Any) -> str:
-    if isinstance(value, bool):
-        return str(value)
-    if isinstance(value, float) and value.is_integer():
-        return str(int(value))
-    return str(value).strip()
+def _first_present(obj: Any, *names: str, default: Any) -> Any:
+    value = _read(obj, *names)
+    return default if value is None else value
+
+
+def _coalesce(*values: Any) -> Any:
+    return next((value for value in values if value is not None), None)
 
 
 def _identifier_or_none(value: Any) -> str | None:
     if value is None:
         return None
-    result = _identifier(value)
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    result = str(value).strip()
     return result or None
 
 
@@ -288,24 +354,22 @@ def _required_identifier(value: Any, field_name: str) -> str:
 def _text_or_none(value: Any) -> str | None:
     if value is None:
         return None
-    result = str(value).strip()
+    result = " ".join(str(value).split())
     return result or None
-
-
-def _required_text(value: Any, field_name: str) -> str:
-    result = _text_or_none(value)
-    if result is None:
-        raise ValueError(f"{field_name} is required")
-    return result
-
-
-def _bounded_text(value: Any, limit: int, *, uppercase: bool = False) -> str:
-    result = _required_text(value, "text")
-    if uppercase:
-        result = result.upper()
-    return result[:limit]
 
 
 def _bounded_optional_text(value: Any, limit: int) -> str | None:
     result = _text_or_none(value)
-    return None if result is None else result[:limit]
+    if result is None:
+        return None
+    if len(result) > limit:
+        raise ValueError(f"reviewed text must not exceed {limit} characters")
+    return result
+
+
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().casefold() in {"1", "true", "yes", "ja"}

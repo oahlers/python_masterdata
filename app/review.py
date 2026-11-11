@@ -33,10 +33,13 @@ def remove_review_field(
     proposal: ProductProposal,
     field_name: str,
 ) -> None:
-    while field_name in proposal.needs_review:
-        proposal.needs_review.remove(
-            field_name
-        )
+    current = getattr(proposal, "needs_review", ()) or ()
+
+    proposal.needs_review = tuple(
+        value
+        for value in current
+        if value != field_name
+    )
 
 
 def apply_user_value(

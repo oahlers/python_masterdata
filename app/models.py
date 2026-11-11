@@ -31,9 +31,7 @@ class SourceProduct:
 
 @dataclass
 class M3Product:
-    """
-    Et eksisterende produkt fra Golden Record / M3.
-    """
+    """Et eksisterende produkt fra Golden Record / M3."""
 
     mmitno: str | None = None
     mmitds: str | None = None
@@ -57,16 +55,13 @@ class M3Product:
 
 @dataclass
 class Evidence:
-    """
-    Forklarer hvorfor programmet foreslår en bestemt værdi.
-    """
+    """Forklarer hvorfor programmet foreslår en bestemt værdi."""
 
     field_name: str
     proposed_value: str
     source: str
 
     source_item_numbers: list[str] = field(default_factory=list)
-
     details: str | None = None
 
 
@@ -75,8 +70,7 @@ class ProductProposal:
     """
     Det produkt programmet foreslår at oprette.
 
-    None betyder:
-    Vi har ikke tilstrækkelig evidens og udfylder derfor ikke feltet.
+    None betyder, at der ikke er tilstrækkelig evidens til at udfylde feltet.
     """
 
     source_product: SourceProduct
@@ -85,6 +79,9 @@ class ProductProposal:
 
     brand_code: str | None = None
     brand_name: str | None = None
+
+    # Et verificeret generation-prefix fra brand_rules. Det er ikke MMBUAR.
+    generation_prefix: str | None = None
 
     item_group: str | None = None
     item_class: str | None = None

@@ -1,294 +1,176 @@
-from app.brand_rules import resolve_brand_rule
-from app.golden_record import GoldenRecord
-from app.item_number_generator import (
-    generate_item_number_for_brand,
-)
-from app.item_number_reservation import (
-    DEFAULT_DATABASE_PATH,
-    get_reservation_for_product,
-    item_number_is_reserved,
-    reserve_item_number,
-)
-from app.models import Evidence, ProductProposal
-from app.product_resolver import ProductResolver
-from app.review import proposal_is_ready
+"""Assign and persistently reserve unique Sæther Codes."""
+from __future__ import annotations
+
+from collections.abc import Iterable, Mapping
+from pathlib import Path
+from typing import Any
+
+from app import item_number_generator, item_number_reservation
 
 
-def _remove_item_number_review(
-    proposal: ProductProposal,
-) -> None:
-    while "item_number" in proposal.needs_review:
-        proposal.needs_review.remove("item_number")
-
-
-def _set_item_number(
-    proposal: ProductProposal,
-    item_number: str,
-    evidence_source: str,
-    evidence_details: str,
-) -> str:
-    proposal.item_number = item_number
-    proposal.evidence["item_number"] = Evidence(
-        field_name="item_number",
-        proposed_value=item_number,
-        source=evidence_source,
-        details=evidence_details,
-    )
-    _remove_item_number_review(proposal)
-    return item_number
-
-
-def _validate_new_product(
-    proposal: ProductProposal,
-    golden_record: GoldenRecord,
-) -> None:
-    if proposal is None:
-        raise ValueError(
-            "MMITNO kan kun tildeles et nyt ProductProposal. "
-            "Eksisterende M3-produkter må ikke få et nyt MMITNO."
-        )
-
-    resolution = ProductResolver(
-        golden_record
-    ).resolve(proposal.source_product)
-
-    if resolution.status != "NEW_PRODUCT":
-        raise ValueError(
-            "Produktet må ikke få MMITNO. "
-            f"{resolution.message}"
-        )
-
-
-def _validate_proposal_ready(
-    proposal: ProductProposal,
-) -> None:
-    if not proposal_is_ready(proposal):
-        raise ValueError(
-            "Produktet er ikke klar til "
-            "MMITNO-tildeling."
-        )
-
-    if not proposal.brand_code:
-        raise ValueError(
-            "Produktet mangler brandkode."
-        )
-
-
-def assign_incoming_item_number(
-    proposal: ProductProposal,
-    golden_record: GoldenRecord,
-    database_path=DEFAULT_DATABASE_PATH,
-) -> str:
-    """
-    Validerer og reserverer en Sæther Code fra leverandørfilen.
-
-    Incoming-numre genereres aldrig om. Ved konflikt blokeres
-    produktet, så nummeret kan afklares manuelt.
-    """
-    _validate_new_product(
-        proposal=proposal,
-        golden_record=golden_record,
-    )
-    _validate_proposal_ready(proposal)
-
-    source_product = proposal.source_product
-    incoming = str(
-        source_product.saether_code or ""
-    ).strip()
-
-    if not incoming:
-        raise ValueError(
-            "Produktet indeholder ingen indkommende Sæther Code."
-        )
-
-    if not incoming.isdigit():
-        raise ValueError(
-            "Indkommende Sæther Code skal kun bestå af cifre."
-        )
-
-    resolution = resolve_brand_rule(
-        brand_code=proposal.brand_code,
-        products=golden_record.products,
-    )
-
-    if resolution.rule is None:
-        observed = [
-            prefix
-            for prefix, _ in resolution.prefix_counts
-        ]
-        raise ValueError(
-            f"Brand {proposal.brand_code} har ikke et sikkert "
-            f"generation-prefix. Status: {resolution.status}. "
-            f"Observerede prefixes: {observed}"
-        )
-
-    expected_prefix = str(
-        resolution.rule.generation_prefix
-    ).strip()
-
-    if not incoming.startswith(expected_prefix):
-        raise ValueError(
-            f"Indkommende Sæther Code {incoming} matcher ikke "
-            f"brandets verificerede generation-prefix "
-            f"{expected_prefix}."
-        )
-
-    golden_record_product = (
-        golden_record.find_by_item_number(incoming)
-    )
-
-    if golden_record_product is not None:
-        raise ValueError(
-            f"Indkommende Sæther Code {incoming} findes allerede "
-            "som MMITNO i Golden Record."
-        )
-
-    existing_reservation = get_reservation_for_product(
-        product=source_product,
-        database_path=database_path,
-    )
-
-    if existing_reservation is not None:
-        if existing_reservation.item_number != incoming:
-            raise ValueError(
-                "Produktet har allerede persistent reserveret "
-                f"MMITNO {existing_reservation.item_number}, men "
-                f"leverandørfilen angiver {incoming}."
-            )
-
-        return _set_item_number(
-            proposal=proposal,
-            item_number=existing_reservation.item_number,
-            evidence_source="incoming_saether_code_existing_reservation",
-            evidence_details=(
-                "Indkommende Sæther Code matcher produktets "
-                "eksisterende persistente reservation."
-            ),
-        )
-
-    if item_number_is_reserved(
-        incoming,
-        database_path=database_path,
-    ):
-        raise ValueError(
-            f"Indkommende Sæther Code {incoming} er allerede "
-            "reserveret til et andet produkt."
-        )
-
-    reservation = reserve_item_number(
-        product=source_product,
-        item_number=incoming,
-        database_path=database_path,
-    )
-
-    return _set_item_number(
-        proposal=proposal,
-        item_number=reservation.item_number,
-        evidence_source="incoming_saether_code",
-        evidence_details=(
-            "Sæther Code kom fra leverandørfilen, blev "
-            "format-, prefix- og collision-valideret og "
-            "derefter persistent reserveret."
-        ),
-    )
-
-
-def assign_generated_item_number(
-    proposal: ProductProposal,
-    golden_record: GoldenRecord,
-    database_path=DEFAULT_DATABASE_PATH,
-) -> str:
-    """
-    Finder eller genererer et stabilt MMITNO, når leverandøren
-    ikke allerede har angivet en Sæther Code.
-    """
-    _validate_new_product(
-        proposal=proposal,
-        golden_record=golden_record,
-    )
-
-    source_product = proposal.source_product
-
-    existing_reservation = get_reservation_for_product(
-        product=source_product,
-        database_path=database_path,
-    )
-
-    if existing_reservation is not None:
-        return _set_item_number(
-            proposal=proposal,
-            item_number=existing_reservation.item_number,
-            evidence_source="existing_reservation",
-            evidence_details=(
-                "Eksisterende MMITNO-reservation er genbrugt."
-            ),
-        )
-
-    _validate_proposal_ready(proposal)
-
-    reserved_numbers = set()
-
-    for _ in range(100):
-        candidate = generate_item_number_for_brand(
-            brand_code=proposal.brand_code,
-            golden_record=golden_record,
-            reserved_numbers=reserved_numbers,
-        )
-
-        if item_number_is_reserved(
-            candidate,
-            database_path=database_path,
-        ):
-            reserved_numbers.add(candidate)
-            continue
-
-        reservation = reserve_item_number(
-            product=source_product,
-            item_number=candidate,
-            database_path=database_path,
-        )
-
-        return _set_item_number(
-            proposal=proposal,
-            item_number=reservation.item_number,
-            evidence_source="persistent_reservation",
-            evidence_details=(
-                "Nyt MMITNO er genereret, collision-checket "
-                "og persistent reserveret."
-            ),
-        )
-
-    raise RuntimeError(
-        "Kunne ikke finde et ledigt MMITNO "
-        "efter 100 forsøg."
-    )
+DEFAULT_CANDIDATE_ATTEMPTS = 100
 
 
 def assign_item_number(
-    proposal: ProductProposal,
-    golden_record: GoldenRecord,
-    database_path=DEFAULT_DATABASE_PATH,
+    proposal: Any,
+    golden_record: Any,
+    database_path: str | Path | None = None,
+    *,
+    verified_generation_prefix: Any,
+    max_attempts: int = DEFAULT_CANDIDATE_ATTEMPTS,
 ) -> str:
-    """
-    Autoritativ indgang til MMITNO-tildeling.
+    """Assign one persistently reserved code and mutate only ``item_number``.
 
-    - Incoming Sæther Code: valideres og reserveres.
-    - Ingen incoming kode: eksisterende generation anvendes.
+    ``verified_generation_prefix`` is mandatory and is never inferred from
+    ``brand_code`` or MMBUAR. Persistent reservation is the source of truth for
+    idempotency and concurrent uniqueness.
     """
+
     if proposal is None:
-        raise ValueError(
-            "MMITNO kan kun tildeles et nyt ProductProposal."
-        )
+        raise ValueError("ProductProposal mangler.")
+    source_product = _read(proposal, "source_product")
+    if source_product is None:
+        raise ValueError("ProductProposal mangler kildeprodukt.")
+    if max_attempts <= 0:
+        raise ValueError("max_attempts skal være større end nul.")
 
-    if proposal.source_product.saether_code:
-        return assign_incoming_item_number(
-            proposal=proposal,
-            golden_record=golden_record,
-            database_path=database_path,
-        )
-
-    return assign_generated_item_number(
-        proposal=proposal,
-        golden_record=golden_record,
-        database_path=database_path,
+    prefix = item_number_generator.validate_generation_prefix(
+        verified_generation_prefix
     )
+    proposal_prefix = _identifier(_read(proposal, "generation_prefix"))
+    if proposal_prefix is not None and proposal_prefix != prefix:
+        raise ValueError(
+            f"Verificeret generation-prefix {prefix} matcher ikke "
+            f"forslagets generation-prefix {proposal_prefix}."
+        )
+
+    existing_reservation = item_number_reservation.get(
+        source_product,
+        database_path,
+    )
+    if existing_reservation is not None:
+        reserved_number = item_number_generator.validate_item_number_candidate(
+            existing_reservation.item_number,
+            prefix,
+        )
+        proposed_number = _identifier(_read(proposal, "item_number"))
+        if proposed_number is not None and proposed_number != reserved_number:
+            raise ValueError(
+                "ProductProposal har en anden Sæther Code end den persistente "
+                "reservation."
+            )
+        _write_item_number(proposal, reserved_number)
+        return reserved_number
+
+    if _identifier(_read(proposal, "item_number")) is not None:
+        raise ValueError(
+            "ProductProposal har en Sæther Code uden en matchende persistent "
+            "reservation."
+        )
+
+    attempts = 0
+    candidates = item_number_generator.generate_item_number_candidates(
+        prefix,
+        max_attempts,
+    )
+    for candidate in candidates:
+        attempts += 1
+        normalized_candidate = item_number_generator.validate_item_number_candidate(
+            candidate,
+            prefix,
+        )
+        if _item_number_exists(golden_record, normalized_candidate):
+            continue
+        if item_number_reservation.is_reserved(
+            normalized_candidate,
+            database_path,
+        ):
+            continue
+        try:
+            reservation = item_number_reservation.reserve(
+                source_product,
+                normalized_candidate,
+                database_path,
+            )
+        except item_number_reservation.ReservationConflict:
+            # Another writer won the race. The database remains authoritative.
+            continue
+
+        reserved_number = item_number_generator.validate_item_number_candidate(
+            reservation.item_number,
+            prefix,
+        )
+        _write_item_number(proposal, reserved_number)
+        return reserved_number
+
+    raise ValueError(
+        "Ingen unik Sæther Code kunne reserveres "
+        f"efter {attempts} kandidatforsøg."
+    )
+
+
+def _item_number_exists(golden_record: Any, item_number: str) -> bool:
+    if golden_record is None:
+        return False
+    finder = getattr(golden_record, "find_by_item_number", None)
+    if callable(finder):
+        value = finder(item_number)
+        if value is None:
+            return False
+        if isinstance(value, (list, tuple, set, frozenset)):
+            return bool(value)
+        return True
+    return any(
+        _identifier(_read(product, "mmitno", "item_number", "saether_code"))
+        == item_number
+        for product in _products(golden_record)
+    )
+
+
+def _products(golden_record: Any) -> Iterable[Any]:
+    for name in ("products", "records", "items"):
+        value = _read(golden_record, name)
+        if value is not None:
+            return tuple(value)
+    if isinstance(golden_record, Mapping):
+        return tuple(golden_record.values())
+    try:
+        return tuple(golden_record)
+    except TypeError:
+        return ()
+
+
+def _write_item_number(proposal: Any, item_number: str) -> None:
+    if isinstance(proposal, Mapping):
+        try:
+            proposal["item_number"] = item_number  # type: ignore[index]
+            return
+        except TypeError as exc:
+            raise ValueError(
+                "ProductProposal kan ikke opdateres med Sæther Code."
+            ) from exc
+    setattr(proposal, "item_number", item_number)
+
+
+def _read(obj: Any, *names: str) -> Any:
+    if obj is None:
+        return None
+    if isinstance(obj, Mapping):
+        folded = {str(key).casefold(): value for key, value in obj.items()}
+        for name in names:
+            if name.casefold() in folded:
+                return folded[name.casefold()]
+        return None
+    for name in names:
+        if hasattr(obj, name):
+            return getattr(obj, name)
+    return None
+
+
+def _identifier(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text.endswith(".0") and text[:-2].isdigit():
+        text = text[:-2]
+    return text or None

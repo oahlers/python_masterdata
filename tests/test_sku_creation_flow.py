@@ -1,4 +1,5 @@
 from app.approval import approve_product
+from app.import_analyzer import AnalyzedProduct
 from app.product_resolver import ProductResolver
 
 from conftest import (
@@ -24,24 +25,31 @@ def test_new_clarins_product_completes_golden_path(
     assert resolution.status == "NEW_PRODUCT"
 
     proposal = proposal_factory(source)
+    analyzed = AnalyzedProduct(
+        source_product=source,
+        status="READY",
+        product_resolution=resolution,
+        proposal=proposal,
+    )
+
     candidate_patcher(monkeypatch, [FIRST_CANDIDATE])
-    verification_result = verification_api.prepare(
-        proposal,
+    verification_result = verification_api.prepare_for_verification(
+        analyzed,
         empty_golden_record,
         reservation_db_path,
-        status="READY",
     )
-    prepared = verification_api.proposal(verification_result, proposal)
 
-    assert prepared.item_number == FIRST_CANDIDATE
-    assert prepared.item_number.startswith("128")
-    assert len(prepared.item_number) == 11
-    assert prepared.item_number.isdigit()
-    assert empty_golden_record.find_by_item_number(prepared.item_number) is None
-    assert reservation_api.get(source, reservation_db_path).item_number == prepared.item_number
+    assert verification_result.status == "PREPARED"
+    assert verification_result.item_number == FIRST_CANDIDATE
+    assert proposal.item_number == FIRST_CANDIDATE
+    assert proposal.item_number.startswith("128")
+    assert len(proposal.item_number) == 11
+    assert proposal.item_number.isdigit()
+    assert empty_golden_record.find_by_item_number(proposal.item_number) == []
+    assert reservation_api.get(source, reservation_db_path).item_number == proposal.item_number
 
     approved = approve_product(
-        proposal=prepared,
+        proposal=proposal,
         golden_record=empty_golden_record,
         database_path=reservation_db_path,
         confirmed=True,
@@ -70,4 +78,7 @@ def test_identifier_conflict_creates_no_reservation(
 
     assert resolution.status == "IDENTIFIER_CONFLICT"
     assert reservation_api.get(source, reservation_db_path) is None
-    assert not reservation_api.is_reserved(EXISTING_ITEM_NUMBER, reservation_db_path)
+    assert not reservation_api.is_reserved(
+        EXISTING_ITEM_NUMBER,
+        reservation_db_path,
+    )

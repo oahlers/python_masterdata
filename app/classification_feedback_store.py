@@ -42,20 +42,58 @@ def build_context(
     """
     Bygger den kontekst et bruger-valg blev foretaget i.
 
-    Vi gemmer ikke kun BMS Product Type.
+    ProductProposal indeholder ikke nødvendigvis source_product.
+    Derfor udtrækkes Product type defensivt, så review og feedback
+    også fungerer for ukendt brand og syntetiske/test-proposals.
     """
 
-    return {
-        "brand_code": proposal.brand_code,
-        "brand_name": proposal.brand_name,
-        "product_type": (
-            proposal.source_product.product_type
-        ),
-        "item_group": proposal.item_group,
-        "item_class": proposal.item_class,
-        "product_line": proposal.product_line,
-    }
+    source_product = getattr(
+        proposal,
+        "source_product",
+        None,
+    )
 
+    product_type = getattr(
+        source_product,
+        "product_type",
+        None,
+    )
+
+    if product_type is None:
+        product_type = getattr(
+            proposal,
+            "product_type",
+            None,
+        )
+
+    return {
+        "brand_code": getattr(
+            proposal,
+            "brand_code",
+            None,
+        ),
+        "brand_name": getattr(
+            proposal,
+            "brand_name",
+            None,
+        ),
+        "product_type": product_type,
+        "item_group": getattr(
+            proposal,
+            "item_group",
+            None,
+        ),
+        "item_class": getattr(
+            proposal,
+            "item_class",
+            None,
+        ),
+        "product_line": getattr(
+            proposal,
+            "product_line",
+            None,
+        ),
+    }
 
 def save_feedback(
     proposal: ProductProposal,
